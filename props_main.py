@@ -24,13 +24,13 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from config.logging_config import setup_logger
-from config.settings import PROPS_SEASON
+from config.settings import PROPS_SEASON, PROPS_MAX_DAILY_EXPOSURE
 from data.database import (
     initialize_db,
     get_games_for_date,
     get_games_with_event_ids,
     update_game_odds_event_id,
-    get_player_stats_by_name,
+    get_all_player_stats,
     save_player_props_prediction,
     get_player_props_for_game,
     get_finished_games_without_props_evaluation,
@@ -43,9 +43,55 @@ from agents.agent_odds_specialist import AgentOddsSpecialist
 from agents.agent_props_scout import AgentPropsScout
 from agents.agent_props_matchup import AgentPropsMatchup
 from agents.agent_props_mathematician import AgentPropsMathematician
-from agents.agent_props_odds import AgentPropsOdds, get_last_requests_remaining
+from agents.agent_props_odds import AgentPropsOdds, get_last_requests_remaining, _normalize_player_name
 
 logger = setup_logger("PropsOrchestrator")
+
+
+def _build_player_lookup(all_stats) -> tuple[dict, dict]:
+    """
+    Build two dicts from player_stats rows for fuzzy name matching:
+      exact_map  : normalized_name → row  (one-to-one)
+      last_map   : last_name → [row, ...]  (one-to-many, for fallback)
+    """
+    exact_map: dict = {}
+    last_map: dict = {}
+    for row in all_stats:
+        norm = _normalize_player_name(row["player_name"])
+        exact_map[norm] = row
+        last = norm.split()[-1] if norm.split() else ""
+        if last:
+            last_map.setdefault(last, []).append(row)
+    return exact_map, last_map
+
+
+def _find_player(odds_name: str, exact_map: dict, last_map: dict):
+    """
+    Fuzzy lookup of a player by the odds API name.
+    1. Exact normalized match
+    2. Last-name match (only if unambiguous — single result)
+    Returns the matching Row or None.
+    """
+    norm = _normalize_player_name(odds_name)
+
+    # 1. Exact normalized match (handles accents, dots, case)
+    if norm in exact_map:
+        return exact_map[norm]
+
+    # 2. Unambiguous last-name match
+    last = norm.split()[-1] if norm.split() else ""
+    if last:
+        candidates = last_map.get(last, [])
+        if len(candidates) == 1:
+            logger.debug(
+                "Player '%s' matched by last name → '%s'",
+                odds_name,
+                candidates[0]["player_name"],
+            )
+            return candidates[0]
+
+    return None
+
 
 CDN_BOXSCORE = "https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
 CDN_HEADERS = {
@@ -172,6 +218,11 @@ class PropsOrchestrator:
             game_date,
         )
 
+        # Pre-load all player stats once and build fuzzy lookup dicts
+        all_stats = get_all_player_stats(PROPS_SEASON)
+        exact_map, last_map = _build_player_lookup(all_stats)
+        logger.info("Loaded %d player stat rows for fuzzy matching", len(all_stats))
+
         all_predictions: list[dict] = []
 
         for game in games_with_events:
@@ -196,6 +247,8 @@ class PropsOrchestrator:
                     )
                     continue
 
+                matched = 0
+                skipped = 0
                 logger.info(
                     "  Received %d player lines for %s vs %s",
                     len(lines),
@@ -205,17 +258,16 @@ class PropsOrchestrator:
 
                 for player_line in lines:
                     try:
-                        ps = get_player_stats_by_name(
-                            player_line.player_name, PROPS_SEASON
-                        )
+                        ps = _find_player(player_line.player_name, exact_map, last_map)
                         if ps is None:
-                            # Try normalized name lookup (best-effort)
                             logger.debug(
                                 "No player stats found for '%s' – skipping",
                                 player_line.player_name,
                             )
+                            skipped += 1
                             continue
 
+                        matched += 1
                         # Determine if player's team is home
                         player_team = ps["team_name"] or ""
                         is_home = player_team == home_team
@@ -241,7 +293,6 @@ class PropsOrchestrator:
                         recs = self.props_odds.analyze_value_props(prob, player_line)
                         best = recs[0] if recs else None
 
-                        # Build prediction record
                         edge_over = None
                         edge_under = None
                         for rec in recs:
@@ -273,9 +324,6 @@ class PropsOrchestrator:
                                 "recommendations": [r.to_dict() for r in recs],
                             },
                         }
-
-                        pred_id = save_player_props_prediction(pred_record)
-                        pred_record["prediction_id"] = pred_id
                         all_predictions.append(pred_record)
 
                     except Exception as exc:
@@ -287,6 +335,11 @@ class PropsOrchestrator:
                             exc_info=True,
                         )
 
+                logger.info(
+                    "  %s vs %s: matched %d / %d players (%d skipped)",
+                    home_team, away_team, matched, len(lines), skipped,
+                )
+
             except Exception as exc:
                 logger.error(
                     "Unhandled error processing game %s (%s vs %s): %s",
@@ -296,6 +349,14 @@ class PropsOrchestrator:
                     exc,
                     exc_info=True,
                 )
+
+        # Apply daily exposure cap before saving
+        self._apply_exposure_cap(all_predictions)
+
+        # Save all predictions
+        for pred in all_predictions:
+            pred_id = save_player_props_prediction(pred)
+            pred["prediction_id"] = pred_id
 
         remaining = get_last_requests_remaining()
         if remaining is not None:
@@ -437,6 +498,44 @@ class PropsOrchestrator:
             logger.error("Error fetching props profitability summary: %s", exc)
 
     # ── Helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_exposure_cap(predictions: list[dict]) -> None:
+        """
+        Enforce PROPS_MAX_DAILY_EXPOSURE: sort value bets by edge descending,
+        greedily assign until cap is hit, zero out the rest.
+        Modifies predictions in-place.
+        """
+        def _bet_edge(p: dict) -> float:
+            bet = p.get("recommended_bet")
+            if bet == "over":
+                return p.get("edge_over") or 0.0
+            if bet == "under":
+                return p.get("edge_under") or 0.0
+            return 0.0
+
+        value_bets = [p for p in predictions if p.get("recommended_bet")]
+        value_bets.sort(key=_bet_edge, reverse=True)
+
+        total_stake = 0.0
+        dropped = 0
+        for p in value_bets:
+            stake = p.get("bet_stake") or 0.0
+            if total_stake + stake > PROPS_MAX_DAILY_EXPOSURE:
+                p["recommended_bet"] = None
+                p["bet_stake"] = None
+                dropped += 1
+            else:
+                total_stake += stake
+
+        if dropped:
+            logger.info(
+                "Daily exposure cap (%.1f%%): dropped %d bet(s), "
+                "total stake kept: %.1f%%",
+                PROPS_MAX_DAILY_EXPOSURE,
+                dropped,
+                total_stake,
+            )
 
     def _fetch_player_scores(self, game_id: str) -> Optional[dict[str, int]]:
         """
