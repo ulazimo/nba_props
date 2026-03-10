@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  nba-predictor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nba_predictor
+    restart: unless-stopped
+
+    # ── Environment ──────────────────────────────────────────────────────
+    env_file:
+      - .env
+
+    # ── Persistent volumes ────────────────────────────────────────────────
+    volumes:
+      - nba_data:/app/data
+      - nba_logs:/app/logs
+
+    # ── Logging ───────────────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    # ── Resource limits ───────────────────────────────────────────────────
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.50"
+
+    # ── Timezone ──────────────────────────────────────────────────────────
+    environment:
+      - TZ=Europe/Belgrade
+
+volumes:
+  nba_data:
+    driver: local
+  nba_logs:
+    driver: local

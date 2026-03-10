@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree -L 2 -I '__pycache__' /Users/MladenD/PycharmProjects/nba_predictor 2>/dev/null || find /Users/MladenD/PycharmProjects/nba_predictor -type f -name \"*.py\" -o -type f -name \"*.yml\" -o -type f -name \"*.yaml\" -o -type f -name \"*.toml\" -o -type f -name \"*.md\" | head -40)",
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(python --version && pip show apscheduler requests python-dotenv 2>/dev/null | grep \"Name:\")",
+      "Bash(python3 -c \"\nimport sys\nsys.path.insert\\(0, '.'\\)\nfrom config import settings\nfrom data import database\nfrom agents import agent_scout, agent_matchup_expert, agent_mathematician, agent_odds_specialist, agent_evaluator\nfrom main import NBAOrchestrator\nprint\\('OK'\\)\n\")",
+      "Bash(python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt -q && python3 -c \"\nimport sys\nsys.path.insert\\(0, '.'\\)\nfrom config import settings\nfrom data import database\nfrom agents import agent_scout, agent_matchup_expert, agent_mathematician, agent_odds_specialist, agent_evaluator\nfrom main import NBAOrchestrator\nprint\\('OK'\\)\n\")",
+      "Bash(gh repo:*)"
+    ]
+  }
+}
