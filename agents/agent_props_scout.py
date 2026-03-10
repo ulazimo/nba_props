@@ -410,7 +410,8 @@ class AgentPropsScout:
                 std_dev: Optional[float] = None
                 if len(pts_list) >= 5:
                     mean = sum(pts_list) / len(pts_list)
-                    variance = sum((p - mean) ** 2 for p in pts_list) / len(pts_list)
+                    # Sample variance (Bessel's correction: n-1)
+                    variance = sum((p - mean) ** 2 for p in pts_list) / (len(pts_list) - 1)
                     std_dev = round(math.sqrt(variance), 2)
 
                 update_stats = {

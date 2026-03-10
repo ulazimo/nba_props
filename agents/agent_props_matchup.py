@@ -9,11 +9,12 @@ Projects player points for a specific game:
 """
 
 import sqlite3
+from datetime import datetime
 from typing import Optional
 
 from config.logging_config import setup_logger
-from config.settings import CURRENT_SEASON, PROPS_SEASON, PROPS_STD_DEV_FACTOR
-from data.database import get_all_team_stats, get_team_stats
+from config.settings import PROPS_SEASON, PROPS_STD_DEV_FACTOR, PROPS_B2B_FACTOR
+from data.database import get_all_team_stats, get_team_stats, get_last_game_date
 
 logger = setup_logger("AgentPropsMatchup")
 
@@ -31,6 +32,7 @@ class PlayerMatchupReport:
         pace_factor: float,
         def_factor: float,
         games_used: int,
+        b2b: bool = False,
     ):
         self.player_name = player_name
         self.team_name = team_name
@@ -41,6 +43,7 @@ class PlayerMatchupReport:
         self.pace_factor = pace_factor
         self.def_factor = def_factor
         self.games_used = games_used
+        self.b2b = b2b
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +56,7 @@ class PlayerMatchupReport:
             "pace_factor": self.pace_factor,
             "def_factor": self.def_factor,
             "games_used": self.games_used,
+            "b2b": self.b2b,
         }
 
 
@@ -65,7 +69,7 @@ class AgentPropsMatchup:
         if self._league_cache is not None:
             return self._league_cache
 
-        all_stats = get_all_team_stats(CURRENT_SEASON)
+        all_stats = get_all_team_stats(PROPS_SEASON)
         if not all_stats:
             logger.warning("No team stats in DB – defaults used for league averages")
             return {"avg_pts": 115.0, "avg_opp": 115.0, "avg_pace": 100.0}
@@ -98,6 +102,7 @@ class AgentPropsMatchup:
         home_team: str,
         away_team: str,
         is_home: bool,
+        game_date: Optional[str] = None,
     ) -> Optional[PlayerMatchupReport]:
         """
         Projects player points for the given game context.
@@ -122,12 +127,18 @@ class AgentPropsMatchup:
 
         lg = self._get_league_averages()
 
-        # ── 1. Base PPG: blend season avg with L10 ────────────────────────
+        # ── 1. Base PPG: blend season avg with L10 and L5 ────────────────
         season_ppg = player_stats["avg_points"] or 0.0
         l10_ppg = player_stats["l10_ppg"]
+        l5_ppg = player_stats["l5_ppg"]
 
-        if l10_ppg is not None:
+        if l5_ppg is not None and l10_ppg is not None:
+            # Full blend: season anchors, L10 medium-term, L5 most recent form
+            base_ppg = 0.4 * season_ppg + 0.3 * l10_ppg + 0.3 * l5_ppg
+        elif l10_ppg is not None:
             base_ppg = 0.6 * season_ppg + 0.4 * l10_ppg
+        elif l5_ppg is not None:
+            base_ppg = 0.7 * season_ppg + 0.3 * l5_ppg
         else:
             base_ppg = season_ppg
 
@@ -138,8 +149,8 @@ class AgentPropsMatchup:
             return None
 
         # ── 2. Pace factor ────────────────────────────────────────────────
-        home_stats = get_team_stats(home_team, CURRENT_SEASON)
-        away_stats = get_team_stats(away_team, CURRENT_SEASON)
+        home_stats = get_team_stats(home_team, PROPS_SEASON)
+        away_stats = get_team_stats(away_team, PROPS_SEASON)
 
         home_pace = (home_stats["pace"] if home_stats and home_stats["pace"] else lg["avg_pace"])
         away_pace = (away_stats["pace"] if away_stats and away_stats["pace"] else lg["avg_pace"])
@@ -147,7 +158,7 @@ class AgentPropsMatchup:
         pace_factor = game_pace / lg["avg_pace"] if lg["avg_pace"] > 0 else 1.0
 
         # ── 3. Defensive factor ───────────────────────────────────────────
-        opp_stats = get_team_stats(opponent_team, CURRENT_SEASON)
+        opp_stats = get_team_stats(opponent_team, PROPS_SEASON)
         if opp_stats and opp_stats["opp_pts_per_game"]:
             opp_ppg_allowed = opp_stats["opp_pts_per_game"]
         else:
@@ -160,7 +171,27 @@ class AgentPropsMatchup:
         projected = base_ppg * pace_factor * def_factor
         projected = max(0.1, round(projected, 2))
 
-        # ── 5. Std dev ────────────────────────────────────────────────────
+        # ── 5. B2B penalty ────────────────────────────────────────────────
+        b2b = False
+        if game_date:
+            try:
+                last_date = get_last_game_date(team_name, game_date)
+                if last_date:
+                    delta = (
+                        datetime.strptime(game_date, "%Y-%m-%d")
+                        - datetime.strptime(last_date, "%Y-%m-%d")
+                    ).days
+                    if delta == 1:
+                        b2b = True
+                        projected = round(projected * PROPS_B2B_FACTOR, 2)
+                        logger.info(
+                            "  B2B penalty: %s projected reduced to %.1f (×%.2f)",
+                            player_name, projected, PROPS_B2B_FACTOR,
+                        )
+            except Exception as exc:
+                logger.debug("B2B check failed for %s: %s", player_name, exc)
+
+        # ── 6. Std dev ────────────────────────────────────────────────────
         raw_std = player_stats["std_dev_points"]
         if raw_std is not None and raw_std > 0:
             std_dev = float(raw_std)
@@ -172,13 +203,14 @@ class AgentPropsMatchup:
         games_used = player_stats["games_played"] or 0
 
         logger.info(
-            "  %s: base=%.1f pace=%.3f def=%.3f projected=%.1f σ=%.1f",
+            "  %s: base=%.1f pace=%.3f def=%.3f projected=%.1f σ=%.1f%s",
             player_name,
             base_ppg,
             pace_factor,
             def_factor,
             projected,
             std_dev,
+            " [B2B]" if b2b else "",
         )
 
         return PlayerMatchupReport(
@@ -191,4 +223,5 @@ class AgentPropsMatchup:
             pace_factor=round(pace_factor, 3),
             def_factor=round(def_factor, 3),
             games_used=games_used,
+            b2b=b2b,
         )

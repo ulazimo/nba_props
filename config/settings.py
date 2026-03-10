@@ -65,6 +65,7 @@ PROPS_RECENT_DAYS: int = int(os.getenv("PROPS_RECENT_DAYS", "20"))
 PROPS_MIN_MINUTES: float = float(os.getenv("PROPS_MIN_MINUTES", "10.0"))
 PROPS_MIN_GAMES: int = int(os.getenv("PROPS_MIN_GAMES", "5"))
 PROPS_STD_DEV_FACTOR: float = float(os.getenv("PROPS_STD_DEV_FACTOR", "0.40"))
+PROPS_B2B_FACTOR: float = float(os.getenv("PROPS_B2B_FACTOR", "0.92"))  # multiplier for B2B games
 PROPS_ODDS_REGIONS: str = os.getenv("PROPS_ODDS_REGIONS", "us")
 NBA_STATS_TIMEOUT: int = int(os.getenv("NBA_STATS_TIMEOUT", "60"))
 NBA_STATS_DELAY: float = float(os.getenv("NBA_STATS_DELAY", "1.0"))

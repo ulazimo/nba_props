@@ -221,7 +221,7 @@ class PropsOrchestrator:
                         is_home = player_team == home_team
 
                         report = self.matchup.analyze(
-                            ps, home_team, away_team, is_home
+                            ps, home_team, away_team, is_home, game_date
                         )
                         if report is None:
                             logger.warning(
@@ -544,8 +544,17 @@ class PropsOrchestrator:
                 except Exception:
                     pass
 
+                b2b_tag = ""
+                try:
+                    raw = p.get("raw_data", {})
+                    if isinstance(raw, str):
+                        raw = json.loads(raw)
+                    if raw.get("matchup", {}).get("b2b"):
+                        b2b_tag = " (B2B)"
+                except Exception:
+                    pass
                 print(
-                    f"  {p['player_name']} ({p['team_name']})"
+                    f"  {p['player_name']}{b2b_tag} ({p['team_name']})"
                     f"  vs  {p['opponent_team']}"
                 )
                 print(

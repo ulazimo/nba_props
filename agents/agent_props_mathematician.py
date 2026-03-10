@@ -73,11 +73,9 @@ class AgentPropsMathematician:
             )
             return None
 
-        if sigma <= 0:
-            logger.warning(
-                "Sigma=%.2f for %s – using 1.0 as fallback", sigma, report.player_name
-            )
-            sigma = 1.0
+        # Clamp sigma: minimum 2.0 prevents degenerate CDF for low-scoring players;
+        # maximum 0.7 × projected keeps most probability mass above zero.
+        sigma = max(2.0, min(sigma, projected * 0.7))
 
         # P(actual > line) using N(projected, sigma²)
         over_prob = 1.0 - _normal_cdf(line, projected, sigma)
