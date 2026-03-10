@@ -167,9 +167,9 @@ class AgentPropsScout:
 
         data = _nba_api_call(
             leaguedashplayerstats.LeagueDashPlayerStats,
-            Season=PROPS_SEASON,
-            SeasonType="Regular Season",
-            PerMode="PerGame",
+            season=PROPS_SEASON,
+            season_type_all_star="Regular Season",
+            per_mode_detailed="PerGame",
         )
         if data is None:
             logger.error("LeagueDashPlayerStats fetch returned None")
@@ -256,10 +256,10 @@ class AgentPropsScout:
 
         data = _nba_api_call(
             playergamelogs.PlayerGameLogs,
-            Season=PROPS_SEASON,
-            SeasonType="Regular Season",
-            DateFrom=date_from,
-            DateTo=date_to,
+            season_nullable=PROPS_SEASON,
+            season_type_nullable="Regular Season",
+            date_from_nullable=date_from,
+            date_to_nullable=date_to,
         )
         if data is None:
             logger.error("PlayerGameLogs fetch returned None")
