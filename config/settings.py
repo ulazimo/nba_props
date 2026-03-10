@@ -59,13 +59,17 @@ NBA_TEAM_ABBREV: dict[str, str] = {
     "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards",
 }
 
+# Reverse lookup: full name → abbreviation
+NBA_NAME_TO_ABBREV: dict[str, str] = {v: k for k, v in NBA_TEAM_ABBREV.items()}
+
 # ── Props settings ────────────────────────────────────────────────────────────
 PROPS_SEASON: str = os.getenv("PROPS_SEASON", "2025-26")
 PROPS_RECENT_DAYS: int = int(os.getenv("PROPS_RECENT_DAYS", "20"))
 PROPS_MIN_MINUTES: float = float(os.getenv("PROPS_MIN_MINUTES", "10.0"))
 PROPS_MIN_GAMES: int = int(os.getenv("PROPS_MIN_GAMES", "5"))
 PROPS_STD_DEV_FACTOR: float = float(os.getenv("PROPS_STD_DEV_FACTOR", "0.40"))
-PROPS_B2B_FACTOR: float = float(os.getenv("PROPS_B2B_FACTOR", "0.92"))  # multiplier for B2B games
+PROPS_B2B_FACTOR: float = float(os.getenv("PROPS_B2B_FACTOR", "0.92"))   # B2B game multiplier
+PROPS_REST_BOOST: float = float(os.getenv("PROPS_REST_BOOST", "1.03"))   # 3+ days rest multiplier
 PROPS_MAX_DAILY_EXPOSURE: float = float(os.getenv("PROPS_MAX_DAILY_EXPOSURE", "20.0"))  # max % bankroll/day
 PROPS_ODDS_REGIONS: str = os.getenv("PROPS_ODDS_REGIONS", "us")
 NBA_STATS_TIMEOUT: int = int(os.getenv("NBA_STATS_TIMEOUT", "60"))

@@ -139,6 +139,12 @@ class PropsOrchestrator:
     def run_props_fetch(self, target_date: Optional[str] = None) -> None:
         logger.info("━━━ PROPS PHASE 1: DATA FETCH ━━━")
 
+        # Fetch team stats (pace, defensive ratings — needed by AgentPropsMatchup)
+        try:
+            self.game_scout.fetch_and_store_team_stats()
+        except Exception as exc:
+            logger.error("Team stats fetch failed (non-fatal): %s", exc)
+
         # Fetch today's game schedule (populates games table used by predict phase)
         try:
             self.game_scout.fetch_todays_games(target_date)

@@ -13,8 +13,20 @@ from datetime import datetime
 from typing import Optional
 
 from config.logging_config import setup_logger
-from config.settings import PROPS_SEASON, PROPS_STD_DEV_FACTOR, PROPS_B2B_FACTOR
-from data.database import get_all_team_stats, get_team_stats, get_last_game_date
+from config.settings import (
+    PROPS_SEASON,
+    PROPS_STD_DEV_FACTOR,
+    PROPS_B2B_FACTOR,
+    PROPS_REST_BOOST,
+    NBA_NAME_TO_ABBREV,
+)
+from data.database import (
+    get_all_team_stats,
+    get_team_stats,
+    get_last_game_date,
+    get_player_home_away_ppg,
+    get_player_vs_opponent,
+)
 
 logger = setup_logger("AgentPropsMatchup")
 
@@ -33,6 +45,10 @@ class PlayerMatchupReport:
         def_factor: float,
         games_used: int,
         b2b: bool = False,
+        rest_days: Optional[int] = None,
+        ha_factor: float = 1.0,
+        h2h_factor: float = 1.0,
+        trend_factor: float = 1.0,
     ):
         self.player_name = player_name
         self.team_name = team_name
@@ -44,6 +60,10 @@ class PlayerMatchupReport:
         self.def_factor = def_factor
         self.games_used = games_used
         self.b2b = b2b
+        self.rest_days = rest_days
+        self.ha_factor = ha_factor
+        self.h2h_factor = h2h_factor
+        self.trend_factor = trend_factor
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +77,10 @@ class PlayerMatchupReport:
             "def_factor": self.def_factor,
             "games_used": self.games_used,
             "b2b": self.b2b,
+            "rest_days": self.rest_days,
+            "ha_factor": self.ha_factor,
+            "h2h_factor": self.h2h_factor,
+            "trend_factor": self.trend_factor,
         }
 
 
@@ -167,31 +191,88 @@ class AgentPropsMatchup:
         league_avg_opp = lg["avg_opp"]
         def_factor = opp_ppg_allowed / league_avg_opp if league_avg_opp > 0 else 1.0
 
-        # ── 4. Projected points ───────────────────────────────────────────
-        projected = base_ppg * pace_factor * def_factor
-        projected = max(0.1, round(projected, 2))
+        # ── 4. Home/Away PPG adjustment ───────────────────────────────────
+        player_id = str(player_stats["player_id"])
+        ha_factor = 1.0
+        try:
+            ha = get_player_home_away_ppg(player_id, PROPS_SEASON)
+            location_ppg = ha["home_ppg"] if is_home else ha["away_ppg"]
+            location_games = ha["home_games"] if is_home else ha["away_games"]
+            if location_ppg and location_games >= 5 and season_ppg > 0:
+                ha_factor = max(0.88, min(1.12, location_ppg / season_ppg))
+                logger.debug(
+                    "  %s H/A factor: %.3f (%s avg=%.1f, n=%d)",
+                    player_name, ha_factor,
+                    "home" if is_home else "away", location_ppg, location_games,
+                )
+        except Exception as exc:
+            logger.debug("H/A lookup failed for %s: %s", player_name, exc)
 
-        # ── 5. B2B penalty ────────────────────────────────────────────────
+        # ── 5. H2H vs opponent adjustment ────────────────────────────────
+        h2h_factor = 1.0
+        try:
+            opp_abbr = NBA_NAME_TO_ABBREV.get(opponent_team, "")
+            if opp_abbr:
+                h2h_games = get_player_vs_opponent(player_id, opp_abbr, limit=6)
+                if len(h2h_games) >= 3 and season_ppg > 0:
+                    h2h_avg = sum(int(g["points"] or 0) for g in h2h_games) / len(h2h_games)
+                    h2h_factor = max(0.80, min(1.20, h2h_avg / season_ppg))
+                    logger.debug(
+                        "  %s H2H vs %s: avg=%.1f → factor=%.3f (n=%d)",
+                        player_name, opp_abbr, h2h_avg, h2h_factor, len(h2h_games),
+                    )
+        except Exception as exc:
+            logger.debug("H2H lookup failed for %s: %s", player_name, exc)
+
+        # ── 6. Rest days (B2B / extra rest) ──────────────────────────────
         b2b = False
+        rest_days: Optional[int] = None
+        rest_factor = 1.0
         if game_date:
             try:
                 last_date = get_last_game_date(team_name, game_date)
                 if last_date:
-                    delta = (
+                    rest_days = (
                         datetime.strptime(game_date, "%Y-%m-%d")
                         - datetime.strptime(last_date, "%Y-%m-%d")
                     ).days
-                    if delta == 1:
+                    if rest_days == 1:
                         b2b = True
-                        projected = round(projected * PROPS_B2B_FACTOR, 2)
-                        logger.info(
-                            "  B2B penalty: %s projected reduced to %.1f (×%.2f)",
-                            player_name, projected, PROPS_B2B_FACTOR,
+                        rest_factor = PROPS_B2B_FACTOR
+                        logger.info("  B2B: %s (×%.2f)", player_name, PROPS_B2B_FACTOR)
+                    elif rest_days >= 3:
+                        rest_factor = PROPS_REST_BOOST
+                        logger.debug(
+                            "  Rest boost: %s (%d days, ×%.2f)",
+                            player_name, rest_days, PROPS_REST_BOOST,
                         )
             except Exception as exc:
-                logger.debug("B2B check failed for %s: %s", player_name, exc)
+                logger.debug("Rest days check failed for %s: %s", player_name, exc)
 
-        # ── 6. Std dev ────────────────────────────────────────────────────
+        # ── 7. Scoring trend ─────────────────────────────────────────────
+        trend_factor = 1.0
+        if l5_ppg and l10_ppg and l10_ppg > 0:
+            trend = l5_ppg / l10_ppg
+            # ±5% max; 30% of the trend signal transferred to projection
+            trend_factor = max(0.95, min(1.05, 1.0 + (trend - 1.0) * 0.3))
+            logger.debug(
+                "  %s trend: l5=%.1f l10=%.1f ratio=%.2f → factor=%.3f",
+                player_name, l5_ppg, l10_ppg, trend, trend_factor,
+            )
+
+        # ── 8. Final projection ───────────────────────────────────────────
+        projected = (
+            base_ppg
+            * pace_factor
+            * def_factor
+            * ha_factor
+            * h2h_factor
+            * rest_factor
+            * trend_factor
+        )
+        projected = max(0.1, round(projected, 2))
+
+        # ── 9. Std dev ────────────────────────────────────────────────────
         raw_std = player_stats["std_dev_points"]
         if raw_std is not None and raw_std > 0:
             std_dev = float(raw_std)
@@ -203,14 +284,12 @@ class AgentPropsMatchup:
         games_used = player_stats["games_played"] or 0
 
         logger.info(
-            "  %s: base=%.1f pace=%.3f def=%.3f projected=%.1f σ=%.1f%s",
-            player_name,
-            base_ppg,
-            pace_factor,
-            def_factor,
-            projected,
-            std_dev,
-            " [B2B]" if b2b else "",
+            "  %s: base=%.1f pace=%.3f def=%.3f ha=%.3f h2h=%.3f "
+            "rest=%.3f trend=%.3f → proj=%.1f σ=%.1f%s",
+            player_name, base_ppg, pace_factor, def_factor,
+            ha_factor, h2h_factor, rest_factor, trend_factor,
+            projected, std_dev,
+            " [B2B]" if b2b else (f" [{rest_days}d rest]" if rest_days and rest_days >= 3 else ""),
         )
 
         return PlayerMatchupReport(
@@ -224,4 +303,8 @@ class AgentPropsMatchup:
             def_factor=round(def_factor, 3),
             games_used=games_used,
             b2b=b2b,
+            rest_days=rest_days,
+            ha_factor=round(ha_factor, 3),
+            h2h_factor=round(h2h_factor, 3),
+            trend_factor=round(trend_factor, 3),
         )

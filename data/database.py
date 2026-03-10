@@ -645,6 +645,48 @@ def get_all_player_stats(season: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def get_player_home_away_ppg(player_id: str, season: str) -> dict:
+    """
+    Returns home_ppg, away_ppg, home_games, away_games from player_game_log.
+    Uses all available games for the season (not limited to recent days).
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT is_home, AVG(points) AS avg_pts, COUNT(*) AS n
+            FROM player_game_log
+            WHERE player_id=? AND season=?
+            GROUP BY is_home
+            """,
+            (player_id, season),
+        ).fetchall()
+    result = {"home_ppg": None, "away_ppg": None, "home_games": 0, "away_games": 0}
+    for row in rows:
+        if row["is_home"] == 1:
+            result["home_ppg"] = round(float(row["avg_pts"]), 2)
+            result["home_games"] = int(row["n"])
+        else:
+            result["away_ppg"] = round(float(row["avg_pts"]), 2)
+            result["away_games"] = int(row["n"])
+    return result
+
+
+def get_player_vs_opponent(
+    player_id: str, opponent_abbr: str, limit: int = 6
+) -> list[sqlite3.Row]:
+    """Returns the most recent game logs for a player vs a specific opponent."""
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT * FROM player_game_log
+            WHERE player_id=? AND opponent_abbr=?
+            ORDER BY game_date DESC
+            LIMIT ?
+            """,
+            (player_id, opponent_abbr, limit),
+        ).fetchall()
+
+
 def get_player_game_log(player_id: str, season: str, limit: int = 20) -> list[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute(
