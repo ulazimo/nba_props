@@ -737,8 +737,10 @@ def get_finished_games_without_props_evaluation() -> list[sqlite3.Row]:
             """
             SELECT DISTINCT g.* FROM games g
             JOIN player_props_predictions ppp ON ppp.game_id = g.game_id
-            LEFT JOIN player_props_results ppr ON ppr.game_id = g.game_id
-            WHERE g.status = 'final' AND ppr.id IS NULL
+            LEFT JOIN player_props_results ppr ON ppr.prediction_id = ppp.id
+            WHERE g.status = 'final'
+              AND ppp.recommended_bet IS NOT NULL
+              AND ppr.id IS NULL
             """,
         ).fetchall()
 
@@ -811,3 +813,40 @@ def get_props_profitability_summary() -> dict:
             for r in type_rows if r["bet_type"]
         }
         return d
+
+
+def get_player_latest_team(player_id: str) -> Optional[str]:
+    """Returns the team_name from the player's most recent game log entry."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT team_name FROM player_game_log
+            WHERE player_id=?
+            ORDER BY game_date DESC
+            LIMIT 1
+            """,
+            (player_id,),
+        ).fetchone()
+        return str(row["team_name"]) if row else None
+
+
+def get_props_calibration_data() -> list[dict]:
+    """
+    Returns predicted probability and outcome for each evaluated recommended bet.
+    Used for calibration analysis (are our 60% predictions winning ~60%?).
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                ppp.recommended_bet,
+                ppp.over_prob,
+                ppp.under_prob,
+                ppr.outcome
+            FROM player_props_predictions ppp
+            JOIN player_props_results ppr ON ppr.prediction_id = ppp.id
+            WHERE ppp.recommended_bet IS NOT NULL
+              AND ppr.outcome IN ('win', 'loss')
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]

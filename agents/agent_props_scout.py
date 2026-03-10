@@ -390,6 +390,11 @@ class AgentPropsScout:
                 ]
 
                 if not logs:
+                    logger.debug(
+                        "No qualifying game logs for %s (id=%s) – L5/L10 skipped",
+                        ps["player_name"],
+                        player_id,
+                    )
                     continue
 
                 pts_list = [int(g["points"] or 0) for g in logs]

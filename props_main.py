@@ -31,11 +31,13 @@ from data.database import (
     get_games_with_event_ids,
     update_game_odds_event_id,
     get_all_player_stats,
+    get_player_latest_team,
     save_player_props_prediction,
     get_player_props_for_game,
     get_finished_games_without_props_evaluation,
     save_player_props_result,
     get_props_profitability_summary,
+    get_props_calibration_data,
 )
 
 from agents.agent_scout import AgentScout
@@ -274,9 +276,13 @@ class PropsOrchestrator:
                             continue
 
                         matched += 1
-                        # Determine if player's team is home
-                        player_team = ps["team_name"] or ""
-                        is_home = player_team == home_team
+                        # Use most recent team from game logs to handle mid-season trades
+                        current_team = (
+                            get_player_latest_team(ps["player_id"])
+                            or ps["team_name"]
+                            or ""
+                        )
+                        is_home = current_team == home_team
 
                         report = self.matchup.analyze(
                             ps, home_team, away_team, is_home, game_date
@@ -422,7 +428,8 @@ class PropsOrchestrator:
                         )
                         if actual_pts is None:
                             logger.debug(
-                                "No actual points found for %s in game %s",
+                                "No actual points found for %s in game %s – "
+                                "name may differ between odds API and boxscore",
                                 p_name,
                                 game_id,
                             )
@@ -433,14 +440,26 @@ class PropsOrchestrator:
 
                         if bet_type == "over":
                             bet_odds = pred["over_odds"]
-                            outcome = "win" if actual_pts > line else "loss"
+                            if actual_pts > line:
+                                outcome = "win"
+                            elif actual_pts == line:
+                                outcome = "push"
+                            else:
+                                outcome = "loss"
                         else:  # under
                             bet_odds = pred["under_odds"]
-                            outcome = "win" if actual_pts <= line else "loss"
+                            if actual_pts < line:
+                                outcome = "win"
+                            elif actual_pts == line:
+                                outcome = "push"
+                            else:
+                                outcome = "loss"
 
                         stake = pred["bet_stake"] or 0.0
                         if outcome == "win":
                             profit_loss = round(stake * (bet_odds - 1.0), 4)
+                        elif outcome == "push":
+                            profit_loss = 0.0
                         else:
                             profit_loss = -stake
 
@@ -487,21 +506,57 @@ class PropsOrchestrator:
 
         logger.info("Props Phase 3 complete – %d result(s) recorded", total_evaluated)
 
-        # Log calibration summary if enough data
+        # Log profitability summary
         try:
             summary = get_props_profitability_summary()
-            if summary and summary.get("total_bets", 0) >= 10:
+            total_bets = summary.get("total_bets", 0)
+            if total_bets > 0:
                 logger.info(
                     "Props P&L summary: %d bets | %dW-%dL | "
                     "profit %.2f%% | ROI %.2f%%",
-                    summary["total_bets"],
-                    summary["wins"],
-                    summary["losses"],
-                    summary["total_profit"],
-                    summary["roi_pct"],
+                    total_bets,
+                    summary.get("wins", 0),
+                    summary.get("losses", 0),
+                    summary.get("total_profit", 0.0),
+                    summary.get("roi_pct", 0.0),
                 )
+            else:
+                logger.info("Props P&L summary: no evaluated bets yet")
         except Exception as exc:
             logger.error("Error fetching props profitability summary: %s", exc)
+
+        # Log calibration data
+        try:
+            calib = get_props_calibration_data()
+            if calib:
+                buckets = [(0.50, 0.55), (0.55, 0.60), (0.60, 0.65), (0.65, 0.70), (0.70, 1.01)]
+                logger.info("PROPS CALIBRATION (predicted vs actual win rate):")
+                any_bucket = False
+                for lo, hi in buckets:
+                    group = [
+                        d for d in calib
+                        if d["outcome"] in ("win", "loss")
+                        and lo <= (
+                            d["over_prob"] if d["recommended_bet"] == "over"
+                            else d["under_prob"]
+                        ) < hi
+                    ]
+                    if not group:
+                        continue
+                    any_bucket = True
+                    wins = sum(1 for d in group if d["outcome"] == "win")
+                    label = f"{lo*100:.0f}-{min(hi*100, 100):.0f}%"
+                    logger.info(
+                        "  %s  predicted ~%.0f%%  actual %.0f%%  (n=%d)",
+                        label,
+                        (lo + hi) / 2 * 100,
+                        wins / len(group) * 100,
+                        len(group),
+                    )
+                if not any_bucket:
+                    logger.info("  Not enough data yet for props calibration")
+        except Exception as exc:
+            logger.error("Error computing props calibration: %s", exc)
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -524,22 +579,24 @@ class PropsOrchestrator:
         value_bets.sort(key=_bet_edge, reverse=True)
 
         total_stake = 0.0
-        dropped = 0
+        dropped_names: list[str] = []
         for p in value_bets:
             stake = p.get("bet_stake") or 0.0
             if total_stake + stake > PROPS_MAX_DAILY_EXPOSURE:
+                dropped_names.append(
+                    f"{p['player_name']} ({p.get('recommended_bet','?')} {p.get('points_line','?')})"
+                )
                 p["recommended_bet"] = None
                 p["bet_stake"] = None
-                dropped += 1
             else:
                 total_stake += stake
 
-        if dropped:
+        if dropped_names:
             logger.info(
-                "Daily exposure cap (%.1f%%): dropped %d bet(s), "
-                "total stake kept: %.1f%%",
+                "Daily cap %.1f%% reached – dropped %d bet(s): %s | kept: %.1f%%",
                 PROPS_MAX_DAILY_EXPOSURE,
-                dropped,
+                len(dropped_names),
+                ", ".join(dropped_names),
                 total_stake,
             )
 
@@ -594,16 +651,26 @@ class PropsOrchestrator:
     ) -> Optional[int]:
         """
         Looks up actual points for a player by name.
-        Tries exact match first, then last-name match.
+        1. Exact match
+        2. Normalized match (strips accents, dots, case)
+        3. Last-name match (normalized)
         """
         if player_name in scores:
             return scores[player_name]
 
-        # Last-name fallback
-        last_name = player_name.strip().split()[-1] if player_name.strip() else ""
-        if last_name:
+        norm_ours = _normalize_player_name(player_name)
+
+        # Normalized exact match (handles accents, dots, abbreviations)
+        for name, pts in scores.items():
+            if _normalize_player_name(name) == norm_ours:
+                return pts
+
+        # Normalized last-name fallback
+        our_last = norm_ours.split()[-1] if norm_ours.split() else ""
+        if our_last:
             for name, pts in scores.items():
-                if name.strip().split()[-1] == last_name:
+                box_last = _normalize_player_name(name).split()[-1]
+                if box_last and box_last == our_last:
                     return pts
 
         return None

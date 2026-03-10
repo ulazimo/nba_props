@@ -25,6 +25,7 @@ from config.settings import (
     NBA_API_RETRIES,
     NBA_API_BACKOFF,
     CURRENT_SEASON,
+    PACE_DIVISOR,
 )
 from data.database import (
     upsert_game,
@@ -50,12 +51,8 @@ CDN_HEADERS = {
 }
 
 ELO_K = 20.0
-ELO_HOME_ADVANTAGE = 100.0
 ELO_DEFAULT = 1500.0
 
-# Pace conversion: NBA avg ~113 pts/team → ~100 possessions → factor ~0.885
-# Using 2.15 divisor: 226 total pts → 105 pace (realistic NBA average)
-PACE_DIVISOR = 2.15
 SCHEDULE_CACHE_TTL = 12 * 3600  # seconds; NBA schedule rarely changes intra-day
 
 

@@ -15,6 +15,7 @@ ODDS_ODDS_FORMAT: str = "decimal"
 NBA_API_DELAY: float = float(os.getenv("NBA_API_DELAY", "1.0"))   # seconds between calls
 NBA_API_RETRIES: int = int(os.getenv("NBA_API_RETRIES", "5"))
 NBA_API_BACKOFF: float = float(os.getenv("NBA_API_BACKOFF", "2.0"))
+PACE_DIVISOR: float = float(os.getenv("PACE_DIVISOR", "2.15"))
 
 # ── Database ──────────────────────────────────────────────────────────────────
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
