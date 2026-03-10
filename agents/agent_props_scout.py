@@ -1,9 +1,9 @@
 """
 Agent Props Scout
 -----------------
-Fetches player stats from stats.nba.com via nba_api:
-  - Season averages (LeagueDashPlayerStats) — one API call for all players
-  - Recent game logs (PlayerGameLogs) — one API call, last N days
+Fetches player stats from stats.nba.com via curl_cffi (Chrome TLS impersonation):
+  - Season averages (leaguedashplayerstats) — one API call for all players
+  - Recent game logs (playergamelogs) — one API call, last N days
   - Computes L5/L10 ppg, minutes, std_dev from game_log
 """
 
@@ -31,27 +31,21 @@ from data.database import (
 
 logger = setup_logger("AgentPropsScout")
 
-# Required headers for stats.nba.com
-NBA_STATS_HEADERS = {
-    "Host": "stats.nba.com",
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/121.0.0.0 Safari/537.36"
-    ),
+NBA_STATS_BASE = "https://stats.nba.com/stats"
+
+# Minimal headers required for stats.nba.com
+_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
     "x-nba-stats-origin": "stats",
     "x-nba-stats-token": "true",
     "Referer": "https://www.nba.com/",
     "Origin": "https://www.nba.com",
-    "Connection": "keep-alive",
 }
 
 
 def _parse_minutes(raw) -> Optional[float]:
-    """Parse minutes value from nba_api — can be 'MM:SS' string or a float."""
+    """Parse minutes value — can be 'MM:SS' string or a float."""
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
@@ -73,7 +67,7 @@ def _parse_minutes(raw) -> Optional[float]:
 
 def _parse_matchup(matchup: str) -> tuple[bool, str]:
     """
-    Parse MATCHUP string from PlayerGameLogs.
+    Parse MATCHUP string from playergamelogs.
     'LAL vs. GSW' → is_home=True, opponent='GSW'
     'LAL @ GSW'   → is_home=False, opponent='GSW'
     Returns (is_home, opponent_abbr).
@@ -85,7 +79,6 @@ def _parse_matchup(matchup: str) -> tuple[bool, str]:
     if " @ " in matchup:
         parts = matchup.split(" @ ")
         return False, parts[-1].strip()
-    # Fallback: assume home, no opponent
     return True, ""
 
 
@@ -96,37 +89,49 @@ def _parse_game_date(raw_date: str) -> str:
     return raw_date[:10]
 
 
-def _nba_api_call(endpoint_cls, max_attempts: int = 3, **kwargs):
+def _stats_call(endpoint: str, params: dict, max_attempts: int = 3) -> Optional[dict]:
     """
-    Retry wrapper for nba_api endpoint calls.
-    Sleeps NBA_STATS_DELAY before each attempt, exponential backoff on failure.
-    Returns raw dict from get_dict() or None on exhausted retries.
+    Makes a request to stats.nba.com using curl_cffi (Chrome TLS impersonation)
+    to bypass Cloudflare bot protection.
+    Returns parsed JSON dict or None on failure.
     """
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        logger.error("curl_cffi not installed. Run: pip install curl_cffi")
+        return None
+
+    url = f"{NBA_STATS_BASE}/{endpoint}"
     last_exc: Optional[Exception] = None
+
     for attempt in range(1, max_attempts + 1):
         try:
             time.sleep(NBA_STATS_DELAY)
-            endpoint = endpoint_cls(
-                headers=NBA_STATS_HEADERS,
+            resp = cffi_requests.get(
+                url,
+                params=params,
+                headers=_HEADERS,
+                impersonate="chrome120",
                 timeout=NBA_STATS_TIMEOUT,
-                **kwargs,
             )
-            return endpoint.get_dict()
+            resp.raise_for_status()
+            return resp.json()
         except Exception as exc:
             last_exc = exc
             wait = 2.0 ** attempt
             logger.warning(
-                "nba_api call '%s' failed (attempt %d/%d): %s – retrying in %.1fs",
-                endpoint_cls.__name__,
+                "stats.nba.com '%s' failed (attempt %d/%d): %s – retrying in %.1fs",
+                endpoint,
                 attempt,
                 max_attempts,
                 exc,
                 wait,
             )
             time.sleep(wait)
+
     logger.error(
-        "nba_api call '%s' exhausted all %d retries. Last error: %s",
-        endpoint_cls.__name__,
+        "stats.nba.com '%s' exhausted all %d retries. Last error: %s",
+        endpoint,
         max_attempts,
         last_exc,
     )
@@ -134,7 +139,7 @@ def _nba_api_call(endpoint_cls, max_attempts: int = 3, **kwargs):
 
 
 def _rows_to_dicts(data: dict, result_set_index: int = 0) -> list[dict]:
-    """Convert nba_api resultSets structure to list of dicts."""
+    """Convert nba.com resultSets structure to list of dicts."""
     try:
         rs = data["resultSets"][result_set_index]
         headers = rs["headers"]
@@ -149,34 +154,54 @@ class AgentPropsScout:
 
     def fetch_and_store_season_stats(self) -> bool:
         """
-        Fetches season averages for all NBA players via LeagueDashPlayerStats
+        Fetches season averages for all NBA players via leaguedashplayerstats
         and upserts them into player_stats table.
         Filters out players with < PROPS_MIN_GAMES GP or < PROPS_MIN_MINUTES avg_min.
         """
         logger.info(
-            "Fetching season stats for %s via LeagueDashPlayerStats", PROPS_SEASON
+            "Fetching season stats for %s via leaguedashplayerstats", PROPS_SEASON
         )
 
-        try:
-            from nba_api.stats.endpoints import leaguedashplayerstats
-        except ImportError:
-            logger.error(
-                "nba_api package not installed. Run: pip install nba_api>=1.4.1"
-            )
-            return False
+        params = {
+            "LastNGames": "0",
+            "MeasureType": "Base",
+            "Month": "0",
+            "OpponentTeamID": "0",
+            "PaceAdjust": "N",
+            "PerMode": "PerGame",
+            "Period": "0",
+            "PlusMinus": "N",
+            "Rank": "N",
+            "Season": PROPS_SEASON,
+            "SeasonType": "Regular Season",
+            "Conference": "",
+            "DateFrom": "",
+            "DateTo": "",
+            "Division": "",
+            "GameScope": "",
+            "GameSegment": "",
+            "LeagueID": "",
+            "Location": "",
+            "Outcome": "",
+            "PORound": "",
+            "PlayerExperience": "",
+            "PlayerPosition": "",
+            "SeasonSegment": "",
+            "ShotClockRange": "",
+            "StarterBench": "",
+            "TeamID": "0",
+            "TwoWay": "0",
+            "VsConference": "",
+            "VsDivision": "",
+        }
 
-        data = _nba_api_call(
-            leaguedashplayerstats.LeagueDashPlayerStats,
-            season=PROPS_SEASON,
-            season_type_all_star="Regular Season",
-            per_mode_detailed="PerGame",
-        )
+        data = _stats_call("leaguedashplayerstats", params)
         if data is None:
-            logger.error("LeagueDashPlayerStats fetch returned None")
+            logger.error("leaguedashplayerstats fetch returned None")
             return False
 
         players = _rows_to_dicts(data)
-        logger.info("Received %d player rows from LeagueDashPlayerStats", len(players))
+        logger.info("Received %d player rows from leaguedashplayerstats", len(players))
 
         stored = 0
         skipped = 0
@@ -232,42 +257,52 @@ class AgentPropsScout:
     def fetch_and_store_recent_logs(self) -> bool:
         """
         Fetches player game logs for the last PROPS_RECENT_DAYS days via
-        PlayerGameLogs and upserts entries into player_game_log.
+        playergamelogs and upserts entries into player_game_log.
         Calls _recompute_recent_averages() after storing.
         """
         logger.info(
-            "Fetching recent game logs (last %d days) for %s via PlayerGameLogs",
+            "Fetching recent game logs (last %d days) for %s via playergamelogs",
             PROPS_RECENT_DAYS,
             PROPS_SEASON,
         )
-
-        try:
-            from nba_api.stats.endpoints import playergamelogs
-        except ImportError:
-            logger.error(
-                "nba_api package not installed. Run: pip install nba_api>=1.4.1"
-            )
-            return False
 
         date_from = (date.today() - timedelta(days=PROPS_RECENT_DAYS)).strftime(
             "%m/%d/%Y"
         )
         date_to = date.today().strftime("%m/%d/%Y")
 
-        data = _nba_api_call(
-            playergamelogs.PlayerGameLogs,
-            season_nullable=PROPS_SEASON,
-            season_type_nullable="Regular Season",
-            date_from_nullable=date_from,
-            date_to_nullable=date_to,
-        )
+        params = {
+            "DateFrom": date_from,
+            "DateTo": date_to,
+            "GameSegment": "",
+            "LastNGames": "",
+            "LeagueID": "",
+            "Location": "",
+            "MeasureType": "",
+            "Month": "",
+            "OppTeamID": "",
+            "Outcome": "",
+            "PORound": "",
+            "PerMode": "",
+            "Period": "",
+            "PlayerID": "",
+            "Season": PROPS_SEASON,
+            "SeasonSegment": "",
+            "SeasonType": "Regular Season",
+            "ShotClockRange": "",
+            "TeamID": "",
+            "VsConference": "",
+            "VsDivision": "",
+        }
+
+        data = _stats_call("playergamelogs", params)
         if data is None:
-            logger.error("PlayerGameLogs fetch returned None")
+            logger.error("playergamelogs fetch returned None")
             return False
 
         logs = _rows_to_dicts(data)
         logger.info(
-            "Received %d game log rows from PlayerGameLogs (last %d days)",
+            "Received %d game log rows from playergamelogs (last %d days)",
             len(logs),
             PROPS_RECENT_DAYS,
         )
@@ -348,7 +383,6 @@ class AgentPropsScout:
                 player_id = ps["player_id"]
                 raw_logs = get_player_game_log(player_id, PROPS_SEASON, limit=20)
 
-                # Filter to qualifying minutes
                 logs = [
                     g
                     for g in raw_logs
@@ -373,7 +407,6 @@ class AgentPropsScout:
                     round(sum(l10_min) / len(l10_min), 2) if l10_min else None
                 )
 
-                # Sample std dev (n >= 5 for meaningful estimate)
                 std_dev: Optional[float] = None
                 if len(pts_list) >= 5:
                     mean = sum(pts_list) / len(pts_list)
