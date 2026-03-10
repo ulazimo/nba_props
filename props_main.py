@@ -36,6 +36,7 @@ from data.database import (
     get_props_profitability_summary,
 )
 
+from agents.agent_scout import AgentScout
 from agents.agent_props_scout import AgentPropsScout
 from agents.agent_props_matchup import AgentPropsMatchup
 from agents.agent_props_mathematician import AgentPropsMathematician
@@ -76,6 +77,7 @@ class PropsOrchestrator:
     def __init__(self):
         logger.info("Initializing NBA Props Prediction System")
         initialize_db()
+        self.game_scout = AgentScout()
         self.scout = AgentPropsScout()
         self.matchup = AgentPropsMatchup()
         self.mathematician = AgentPropsMathematician()
@@ -84,8 +86,15 @@ class PropsOrchestrator:
 
     # ── Phase 1: Data Fetching ────────────────────────────────────────────
 
-    def run_props_fetch(self) -> None:
+    def run_props_fetch(self, target_date: Optional[str] = None) -> None:
         logger.info("━━━ PROPS PHASE 1: DATA FETCH ━━━")
+
+        # Fetch today's game schedule (populates games table used by predict phase)
+        try:
+            self.game_scout.fetch_todays_games(target_date)
+        except Exception as exc:
+            logger.error("Game schedule fetch failed (non-fatal): %s", exc)
+
         try:
             ok = self.scout.fetch_and_store_season_stats()
             if ok:
@@ -569,7 +578,7 @@ if __name__ == "__main__":
     orchestrator = PropsOrchestrator()
 
     if args.phase in ("fetch", "all"):
-        orchestrator.run_props_fetch()
+        orchestrator.run_props_fetch(args.date)
     if args.phase in ("predict", "all"):
         orchestrator.run_props_predict(args.date)
     if args.phase in ("evaluate", "all"):
