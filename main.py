@@ -97,6 +97,9 @@ class NBAOrchestrator:
                 odds_data = self.odds_specialist.match_odds_to_game(
                     home_team, away_team, all_odds
                 )
+                if odds_data:
+                    from data.database import update_game_odds_event_id
+                    update_game_odds_event_id(game_id, odds_data.game_id)
                 total_line = odds_data.total_line if odds_data else None
 
                 # Step 3: Probability calculation

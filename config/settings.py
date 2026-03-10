@@ -44,3 +44,27 @@ SEASON_TYPE: str = "Regular Season"
 SCHEDULE_FETCH_TIME: str = os.getenv("SCHEDULE_FETCH_TIME", "10:00")
 SCHEDULE_PREDICT_TIME: str = os.getenv("SCHEDULE_PREDICT_TIME", "22:00")
 SCHEDULE_EVALUATE_TIME: str = os.getenv("SCHEDULE_EVALUATE_TIME", "09:00")
+
+# ── NBA team abbreviation → full name ────────────────────────────────────────
+NBA_TEAM_ABBREV: dict[str, str] = {
+    "ATL": "Atlanta Hawks", "BOS": "Boston Celtics", "BKN": "Brooklyn Nets",
+    "CHA": "Charlotte Hornets", "CHI": "Chicago Bulls", "CLE": "Cleveland Cavaliers",
+    "DAL": "Dallas Mavericks", "DEN": "Denver Nuggets", "DET": "Detroit Pistons",
+    "GSW": "Golden State Warriors", "HOU": "Houston Rockets", "IND": "Indiana Pacers",
+    "LAC": "LA Clippers", "LAL": "Los Angeles Lakers", "MEM": "Memphis Grizzlies",
+    "MIA": "Miami Heat", "MIL": "Milwaukee Bucks", "MIN": "Minnesota Timberwolves",
+    "NOP": "New Orleans Pelicans", "NYK": "New York Knicks", "OKC": "Oklahoma City Thunder",
+    "ORL": "Orlando Magic", "PHI": "Philadelphia 76ers", "PHX": "Phoenix Suns",
+    "POR": "Portland Trail Blazers", "SAC": "Sacramento Kings", "SAS": "San Antonio Spurs",
+    "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards",
+}
+
+# ── Props settings ────────────────────────────────────────────────────────────
+PROPS_SEASON: str = os.getenv("PROPS_SEASON", "2025-26")
+PROPS_RECENT_DAYS: int = int(os.getenv("PROPS_RECENT_DAYS", "20"))
+PROPS_MIN_MINUTES: float = float(os.getenv("PROPS_MIN_MINUTES", "10.0"))
+PROPS_MIN_GAMES: int = int(os.getenv("PROPS_MIN_GAMES", "5"))
+PROPS_STD_DEV_FACTOR: float = float(os.getenv("PROPS_STD_DEV_FACTOR", "0.40"))
+PROPS_ODDS_REGIONS: str = os.getenv("PROPS_ODDS_REGIONS", "us")
+NBA_STATS_TIMEOUT: int = int(os.getenv("NBA_STATS_TIMEOUT", "30"))
+NBA_STATS_DELAY: float = float(os.getenv("NBA_STATS_DELAY", "1.0"))

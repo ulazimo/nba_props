@@ -51,6 +51,7 @@ def initialize_db() -> None:
                 home_score      INTEGER,
                 away_score      INTEGER,
                 status          TEXT    DEFAULT 'scheduled',
+                odds_event_id   TEXT,
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -139,6 +140,92 @@ def initialize_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_gamelog_team     ON game_log(team_id, season);
             CREATE INDEX IF NOT EXISTS idx_gamelog_date     ON game_log(game_date);
             CREATE INDEX IF NOT EXISTS idx_gamelog_matchup  ON game_log(team_id, opponent_id, season);
+
+            CREATE TABLE IF NOT EXISTS player_stats (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id       TEXT    NOT NULL,
+                player_name     TEXT    NOT NULL,
+                team_id         TEXT,
+                team_name       TEXT,
+                season          TEXT    NOT NULL,
+                games_played    INTEGER DEFAULT 0,
+                avg_minutes     REAL,
+                avg_points      REAL,
+                avg_fga         REAL,
+                avg_fta         REAL,
+                avg_fg3a        REAL,
+                l5_ppg          REAL,
+                l10_ppg         REAL,
+                l5_minutes      REAL,
+                l10_minutes     REAL,
+                std_dev_points  REAL,
+                updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(player_id, season)
+            );
+
+            CREATE TABLE IF NOT EXISTS player_game_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id       TEXT    NOT NULL,
+                player_name     TEXT    NOT NULL,
+                team_id         TEXT,
+                team_name       TEXT,
+                game_id         TEXT    NOT NULL,
+                game_date       DATE    NOT NULL,
+                season          TEXT    NOT NULL,
+                minutes         REAL,
+                points          INTEGER,
+                fga             INTEGER,
+                fgm             INTEGER,
+                fg3a            INTEGER,
+                fg3m            INTEGER,
+                fta             INTEGER,
+                ftm             INTEGER,
+                opponent_abbr   TEXT,
+                is_home         INTEGER,
+                UNIQUE(player_id, game_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS player_props_predictions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id         TEXT    NOT NULL,
+                odds_event_id   TEXT,
+                player_id       TEXT    NOT NULL,
+                player_name     TEXT    NOT NULL,
+                team_name       TEXT,
+                opponent_team   TEXT,
+                predicted_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                projected_points REAL,
+                points_line     REAL,
+                over_prob       REAL,
+                under_prob      REAL,
+                over_odds       REAL,
+                under_odds      REAL,
+                edge_over       REAL,
+                edge_under      REAL,
+                recommended_bet TEXT,
+                bet_stake       REAL,
+                raw_data        TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS player_props_results (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                prediction_id   INTEGER NOT NULL REFERENCES player_props_predictions(id),
+                game_id         TEXT    NOT NULL,
+                player_id       TEXT    NOT NULL,
+                evaluated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                actual_points   INTEGER,
+                bet_type        TEXT,
+                bet_odds        REAL,
+                stake           REAL,
+                outcome         TEXT,
+                profit_loss     REAL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_player_stats_name   ON player_stats(player_name, season);
+            CREATE INDEX IF NOT EXISTS idx_player_log_player   ON player_game_log(player_id, season);
+            CREATE INDEX IF NOT EXISTS idx_player_log_date     ON player_game_log(game_date);
+            CREATE INDEX IF NOT EXISTS idx_props_pred_game     ON player_props_predictions(game_id);
+            CREATE INDEX IF NOT EXISTS idx_props_pred_player   ON player_props_predictions(player_id);
             """
         )
     logger.info("Database initialized successfully")
@@ -462,3 +549,223 @@ def get_calibration_data() -> list[dict]:
             """,
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Games – odds event helpers ────────────────────────────────────────────────
+
+def update_game_odds_event_id(game_id: str, event_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE games SET odds_event_id=? WHERE game_id=?",
+            (event_id, game_id),
+        )
+
+
+def get_games_with_event_ids(game_date: str) -> list[sqlite3.Row]:
+    """Returns games for the given date including the odds_event_id column."""
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM games WHERE game_date=? ORDER BY game_id",
+            (game_date,),
+        ).fetchall()
+
+
+# ── Player stats ──────────────────────────────────────────────────────────────
+
+def upsert_player_stats(stats: dict) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO player_stats
+                (player_id, player_name, team_id, team_name, season,
+                 games_played, avg_minutes, avg_points, avg_fga, avg_fta, avg_fg3a,
+                 l5_ppg, l10_ppg, l5_minutes, l10_minutes, std_dev_points)
+            VALUES
+                (:player_id, :player_name, :team_id, :team_name, :season,
+                 :games_played, :avg_minutes, :avg_points, :avg_fga, :avg_fta, :avg_fg3a,
+                 :l5_ppg, :l10_ppg, :l5_minutes, :l10_minutes, :std_dev_points)
+            ON CONFLICT(player_id, season) DO UPDATE SET
+                player_name    = excluded.player_name,
+                team_id        = excluded.team_id,
+                team_name      = excluded.team_name,
+                games_played   = excluded.games_played,
+                avg_minutes    = excluded.avg_minutes,
+                avg_points     = excluded.avg_points,
+                avg_fga        = excluded.avg_fga,
+                avg_fta        = excluded.avg_fta,
+                avg_fg3a       = excluded.avg_fg3a,
+                l5_ppg         = excluded.l5_ppg,
+                l10_ppg        = excluded.l10_ppg,
+                l5_minutes     = excluded.l5_minutes,
+                l10_minutes    = excluded.l10_minutes,
+                std_dev_points = excluded.std_dev_points,
+                updated_at     = CURRENT_TIMESTAMP
+            """,
+            stats,
+        )
+
+
+def upsert_player_game_log(entry: dict) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO player_game_log
+                (player_id, player_name, team_id, team_name, game_id, game_date, season,
+                 minutes, points, fga, fgm, fg3a, fg3m, fta, ftm, opponent_abbr, is_home)
+            VALUES
+                (:player_id, :player_name, :team_id, :team_name, :game_id, :game_date, :season,
+                 :minutes, :points, :fga, :fgm, :fg3a, :fg3m, :fta, :ftm, :opponent_abbr, :is_home)
+            ON CONFLICT(player_id, game_id) DO NOTHING
+            """,
+            entry,
+        )
+
+
+def get_player_stats(player_id: str, season: str) -> Optional[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM player_stats WHERE player_id=? AND season=?",
+            (player_id, season),
+        ).fetchone()
+
+
+def get_player_stats_by_name(player_name: str, season: str) -> Optional[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM player_stats WHERE player_name=? AND season=?",
+            (player_name, season),
+        ).fetchone()
+
+
+def get_all_player_stats(season: str) -> list[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM player_stats WHERE season=?",
+            (season,),
+        ).fetchall()
+
+
+def get_player_game_log(player_id: str, season: str, limit: int = 20) -> list[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT * FROM player_game_log
+            WHERE player_id=? AND season=?
+            ORDER BY game_date DESC
+            LIMIT ?
+            """,
+            (player_id, season, limit),
+        ).fetchall()
+
+
+# ── Player props predictions ──────────────────────────────────────────────────
+
+def save_player_props_prediction(pred: dict) -> int:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO player_props_predictions
+                (game_id, odds_event_id, player_id, player_name, team_name, opponent_team,
+                 projected_points, points_line, over_prob, under_prob,
+                 over_odds, under_odds, edge_over, edge_under,
+                 recommended_bet, bet_stake, raw_data)
+            VALUES
+                (:game_id, :odds_event_id, :player_id, :player_name, :team_name, :opponent_team,
+                 :projected_points, :points_line, :over_prob, :under_prob,
+                 :over_odds, :under_odds, :edge_over, :edge_under,
+                 :recommended_bet, :bet_stake, :raw_data)
+            """,
+            {**pred, "raw_data": json.dumps(pred.get("raw_data", {}))},
+        )
+        return cursor.lastrowid
+
+
+def get_player_props_for_game(game_id: str) -> list[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM player_props_predictions WHERE game_id=? ORDER BY predicted_at DESC",
+            (game_id,),
+        ).fetchall()
+
+
+def get_finished_games_without_props_evaluation() -> list[sqlite3.Row]:
+    """Returns games that have props predictions but no props results yet."""
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT DISTINCT g.* FROM games g
+            JOIN player_props_predictions ppp ON ppp.game_id = g.game_id
+            LEFT JOIN player_props_results ppr ON ppr.game_id = g.game_id
+            WHERE g.status = 'final' AND ppr.id IS NULL
+            """,
+        ).fetchall()
+
+
+# ── Player props results ──────────────────────────────────────────────────────
+
+def save_player_props_result(result: dict) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO player_props_results
+                (prediction_id, game_id, player_id, actual_points,
+                 bet_type, bet_odds, stake, outcome, profit_loss)
+            VALUES
+                (:prediction_id, :game_id, :player_id, :actual_points,
+                 :bet_type, :bet_odds, :stake, :outcome, :profit_loss)
+            """,
+            result,
+        )
+
+
+def get_props_profitability_summary() -> dict:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*)                                    AS total_bets,
+                SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) AS losses,
+                ROUND(SUM(profit_loss), 2)                  AS total_profit,
+                ROUND(SUM(CASE WHEN outcome != 'void' THEN stake ELSE 0 END), 2) AS total_staked,
+                ROUND(AVG(profit_loss), 2)                  AS avg_profit_per_bet
+            FROM player_props_results
+            """
+        ).fetchone()
+        if not row:
+            return {}
+        d = dict(row)
+        # SQLite SUM() returns NULL when there are no rows — normalize to 0
+        d["wins"] = d["wins"] or 0
+        d["losses"] = d["losses"] or 0
+        d["total_profit"] = d["total_profit"] or 0.0
+        d["total_staked"] = d["total_staked"] or 0.0
+        d["avg_profit_per_bet"] = d["avg_profit_per_bet"] or 0.0
+        staked = d["total_staked"]
+        d["roi_pct"] = round((d["total_profit"] / staked * 100), 2) if staked else 0.0
+
+        # Breakdown by bet type
+        type_rows = conn.execute(
+            """
+            SELECT
+                bet_type,
+                COUNT(*)                                        AS bets,
+                SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END)  AS wins,
+                SUM(CASE WHEN outcome='loss' THEN 1 ELSE 0 END) AS losses,
+                ROUND(SUM(profit_loss), 2)                      AS profit,
+                ROUND(SUM(CASE WHEN outcome != 'void' THEN stake ELSE 0 END), 2) AS staked
+            FROM player_props_results
+            GROUP BY bet_type
+            """
+        ).fetchall()
+        d["by_bet_type"] = {
+            r["bet_type"]: {
+                "bets": r["bets"],
+                "wins": r["wins"],
+                "losses": r["losses"],
+                "profit": r["profit"],
+                "roi_pct": round(r["profit"] / r["staked"] * 100, 2) if r["staked"] else 0.0,
+            }
+            for r in type_rows if r["bet_type"]
+        }
+        return d
