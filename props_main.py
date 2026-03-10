@@ -27,7 +27,9 @@ from config.logging_config import setup_logger
 from config.settings import PROPS_SEASON
 from data.database import (
     initialize_db,
+    get_games_for_date,
     get_games_with_event_ids,
+    update_game_odds_event_id,
     get_player_stats_by_name,
     save_player_props_prediction,
     get_player_props_for_game,
@@ -37,6 +39,7 @@ from data.database import (
 )
 
 from agents.agent_scout import AgentScout
+from agents.agent_odds_specialist import AgentOddsSpecialist
 from agents.agent_props_scout import AgentPropsScout
 from agents.agent_props_matchup import AgentPropsMatchup
 from agents.agent_props_mathematician import AgentPropsMathematician
@@ -78,6 +81,7 @@ class PropsOrchestrator:
         logger.info("Initializing NBA Props Prediction System")
         initialize_db()
         self.game_scout = AgentScout()
+        self.odds_specialist = AgentOddsSpecialist()
         self.scout = AgentPropsScout()
         self.matchup = AgentPropsMatchup()
         self.mathematician = AgentPropsMathematician()
@@ -121,20 +125,46 @@ class PropsOrchestrator:
         logger.info("━━━ PROPS PHASE 2: PREDICTION GENERATION ━━━")
         game_date = target_date or date.today().strftime("%Y-%m-%d")
 
-        games = get_games_with_event_ids(game_date)
+        games = get_games_for_date(game_date)
         if not games:
             logger.warning(
                 "No games found for %s – nothing to predict", game_date
             )
             return []
 
-        games_with_events = [g for g in games if g["odds_event_id"]]
+        # Populate odds_event_id for any games that don't have one yet
+        games_missing_event_id = [g for g in games if not g["odds_event_id"]]
+        if games_missing_event_id:
+            logger.info(
+                "Fetching h2h odds to populate event IDs for %d game(s)",
+                len(games_missing_event_id),
+            )
+            try:
+                all_odds = self.odds_specialist.fetch_odds()
+                for g in games_missing_event_id:
+                    od = self.odds_specialist.match_odds_to_game(
+                        g["home_team"], g["away_team"], all_odds
+                    )
+                    if od:
+                        update_game_odds_event_id(g["game_id"], od.game_id)
+                        logger.info(
+                            "  Mapped %s vs %s → event_id=%s",
+                            g["home_team"], g["away_team"], od.game_id,
+                        )
+            except Exception as exc:
+                logger.error("Failed to populate event IDs (non-fatal): %s", exc)
+
+        # Re-fetch with updated event IDs
+        games_with_events = [
+            g for g in get_games_with_event_ids(game_date) if g["odds_event_id"]
+        ]
         if not games_with_events:
             logger.warning(
-                "No games with odds_event_id found for %s – "
-                "run main.py --phase predict first to populate event IDs",
+                "No games with odds_event_id for %s – "
+                "check ODDS_API_KEY and that games are listed in The Odds API",
                 game_date,
             )
+            return []
 
         logger.info(
             "Generating props predictions for %d game(s) with event IDs on %s",
